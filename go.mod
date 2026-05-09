@@ -3,7 +3,7 @@ module github.com/tijsvdsmagt/appie-go
 go 1.23.0
 
 require (
-	github.com/tijsvdsmagt/appie-go v0.0.13
+	github.com/gwillem/appie-go v0.0.12
 	github.com/gwillem/go-selfupdate v0.0.5
 	github.com/jessevdk/go-flags v1.6.1
 )
