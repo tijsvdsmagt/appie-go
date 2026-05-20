@@ -19,7 +19,6 @@ func TestGetFulfillments(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Verify status variable is passed through
 		status, ok := req.Variables["status"].(string)
 		if !ok {
 			t.Fatal("expected status variable")
@@ -31,6 +30,8 @@ func TestGetFulfillments(t *testing.T) {
 					"result": [
 						{
 							"orderId": 387946303,
+							"transactionCompleted": true,
+							"modifiable": false,
 							"reopenable": false,
 							"isSubscriptionOrder": false,
 							"totalPrice": {
@@ -46,6 +47,8 @@ func TestGetFulfillments(t *testing.T) {
 						},
 						{
 							"orderId": 387000100,
+							"transactionCompleted": true,
+							"modifiable": false,
 							"reopenable": true,
 							"isSubscriptionOrder": true,
 							"totalPrice": {
@@ -71,7 +74,7 @@ func TestGetFulfillments(t *testing.T) {
 	client := New(WithBaseURL(srv.URL), WithTokens("test", "test"))
 
 	t.Run("closed", func(t *testing.T) {
-		fulfillments, err := client.GetFulfillments(context.Background(), FulfillmentClosed, 25)
+		fulfillments, err := client.GetFulfillments(context.Background(), WithStatus(FulfillmentClosed), WithSize(25))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,6 +101,12 @@ func TestGetFulfillments(t *testing.T) {
 		if f.DeliveryMessage != "Bezorgd op dinsdag 15 april" {
 			t.Errorf("got DeliveryMessage %q", f.DeliveryMessage)
 		}
+		if !f.TransactionCompleted {
+			t.Error("expected TransactionCompleted=true")
+		}
+		if f.Modifiable {
+			t.Error("expected Modifiable=false")
+		}
 
 		f2 := fulfillments[1]
 		if !f2.IsSubscriptionOrder {
@@ -108,8 +117,8 @@ func TestGetFulfillments(t *testing.T) {
 		}
 	})
 
-	t.Run("open", func(t *testing.T) {
-		fulfillments, err := client.GetFulfillments(context.Background(), FulfillmentOpen, 0)
+	t.Run("open_default", func(t *testing.T) {
+		fulfillments, err := client.GetFulfillments(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -117,6 +126,47 @@ func TestGetFulfillments(t *testing.T) {
 			t.Fatalf("got %d fulfillments, want 2", len(fulfillments))
 		}
 	})
+}
+
+func TestGetFulfillmentsStatusMapping(t *testing.T) {
+	cases := []struct {
+		status      FulfillmentStatus
+		wantGQLStatus string
+	}{
+		{FulfillmentSubmitted, "OPEN"},
+		{FulfillmentSubmittedWithETA, "OPEN"},
+		{FulfillmentOpen, "OPEN"},
+		{FulfillmentDelivered, "CLOSED"},
+		{FulfillmentCancelled, "CLOSED"},
+		{FulfillmentClosed, "CLOSED"},
+	}
+
+	for _, tc := range cases {
+		t.Run(string(tc.status), func(t *testing.T) {
+			var gotStatus string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req graphQLRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Fatal(err)
+				}
+				gotStatus, _ = req.Variables["status"].(string)
+				resp := graphQLResponse[json.RawMessage]{
+					Data: json.RawMessage(`{"orderFulfillments":{"result":[]}}`),
+				}
+				json.NewEncoder(w).Encode(resp)
+			}))
+			defer srv.Close()
+
+			client := New(WithBaseURL(srv.URL), WithTokens("test", "test"))
+			_, err := client.GetFulfillments(context.Background(), WithStatus(tc.status))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotStatus != tc.wantGQLStatus {
+				t.Errorf("status %q: sent GraphQL status %q, want %q", tc.status, gotStatus, tc.wantGQLStatus)
+			}
+		})
+	}
 }
 
 func TestGetFulfillmentDetail(t *testing.T) {

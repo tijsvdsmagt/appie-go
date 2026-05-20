@@ -211,8 +211,6 @@ type Fulfillment struct {
 	OrderID int `json:"orderId"`
 	// Status is the delivery status (e.g., "REOPENED", "SUBMITTED").
 	Status string `json:"status"`
-	// StatusDescription is a human-readable status.
-	StatusDescription string `json:"statusDescription"`
 	// ShoppingType is the order type (e.g., "DELIVERY", "PICKUP").
 	ShoppingType string `json:"shoppingType"`
 	// TotalPrice is the order total in EUR.

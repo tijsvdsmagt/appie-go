@@ -5,13 +5,42 @@ import (
 	"fmt"
 )
 
-// FulfillmentStatus represents the status filter for order fulfillments.
+// FulfillmentStatus represents the delivery status of an order fulfillment.
 type FulfillmentStatus string
 
 const (
+	// Granular delivery status constants returned by the AH API.
+	FulfillmentSubmitted        FulfillmentStatus = "SUBMITTED"
+	FulfillmentSubmittedWithETA FulfillmentStatus = "SUBMITTED_WITH_SHORTREC_ETA"
+	FulfillmentDelivered        FulfillmentStatus = "DELIVERED"
+	FulfillmentCancelled        FulfillmentStatus = "CANCELLED"
+
+	// FulfillmentOpen and FulfillmentClosed are the GraphQL filter values accepted
+	// by the API. They map to groups of granular statuses:
+	//   OPEN   → SUBMITTED, SUBMITTED_WITH_SHORTREC_ETA
+	//   CLOSED → DELIVERED, CANCELLED
+	// These are kept as the default filter values and for backwards compatibility.
 	FulfillmentOpen   FulfillmentStatus = "OPEN"
 	FulfillmentClosed FulfillmentStatus = "CLOSED"
 )
+
+// FulfillmentOption configures a GetFulfillments call.
+type FulfillmentOption func(*fulfillmentQuery)
+
+type fulfillmentQuery struct {
+	status FulfillmentStatus
+	size   int
+}
+
+// WithStatus filters fulfillments by the given order status.
+func WithStatus(s FulfillmentStatus) FulfillmentOption {
+	return func(q *fulfillmentQuery) { q.status = s }
+}
+
+// WithSize limits the number of fulfillments returned (0 uses the API default).
+func WithSize(n int) FulfillmentOption {
+	return func(q *fulfillmentQuery) { q.size = n }
+}
 
 const fetchFulfillmentsQuery = `query FetchOrderFulfillments($status: FulfillmentStatus, $size: Int) {
   orderFulfillments(status: $status, size: $size) {
@@ -24,6 +53,8 @@ const fetchFulfillmentsQuery = `query FetchOrderFulfillments($status: Fulfillmen
 
 fragment OrderFulfillment on Fulfillment {
   orderId
+  transactionCompleted
+  modifiable
   delivery {
     deliveryMessage
     method
@@ -126,10 +157,12 @@ type fulfillmentsGQLResponse struct {
 }
 
 type fulfillmentGQLResult struct {
-	OrderID             int  `json:"orderId"`
-	Reopenable          bool `json:"reopenable"`
-	IsSubscriptionOrder bool `json:"isSubscriptionOrder"`
-	TotalPrice          struct {
+	OrderID              int  `json:"orderId"`
+	TransactionCompleted bool `json:"transactionCompleted"`
+	Modifiable           bool `json:"modifiable"`
+	Reopenable           bool `json:"reopenable"`
+	IsSubscriptionOrder  bool `json:"isSubscriptionOrder"`
+	TotalPrice           struct {
 		TotalPrice struct {
 			Amount float64 `json:"amount"`
 		} `json:"totalPrice"`
@@ -208,14 +241,28 @@ type fulfillmentDetailGQLResponse struct {
 	} `json:"orderFulfillment"`
 }
 
-// GetFulfillments retrieves order fulfillments filtered by status.
-// Use size to limit the number of results (0 for API default).
-func (c *Client) GetFulfillments(ctx context.Context, status FulfillmentStatus, size int) ([]Fulfillment, error) {
-	vars := map[string]any{
-		"status": string(status),
+// GetFulfillments retrieves order fulfillments via GraphQL. Without options it
+// returns all open orders (SUBMITTED and SUBMITTED_WITH_SHORTREC_ETA).
+// Use WithStatus to filter by a specific status and WithSize to limit results.
+func (c *Client) GetFulfillments(ctx context.Context, opts ...FulfillmentOption) ([]Fulfillment, error) {
+	q := fulfillmentQuery{status: FulfillmentOpen}
+	for _, opt := range opts {
+		opt(&q)
 	}
-	if size > 0 {
-		vars["size"] = size
+
+	// Map granular delivery status constants to the OPEN/CLOSED filter the
+	// GraphQL API accepts. The broad filter constants pass through unchanged.
+	gqlStatus := string(q.status)
+	switch q.status {
+	case FulfillmentSubmitted, FulfillmentSubmittedWithETA:
+		gqlStatus = "OPEN"
+	case FulfillmentDelivered, FulfillmentCancelled:
+		gqlStatus = "CLOSED"
+	}
+
+	vars := map[string]any{"status": gqlStatus}
+	if q.size > 0 {
+		vars["size"] = q.size
 	}
 
 	var resp fulfillmentsGQLResponse
@@ -225,13 +272,14 @@ func (c *Client) GetFulfillments(ctx context.Context, status FulfillmentStatus, 
 
 	results := resp.OrderFulfillments.Result
 	fulfillments := make([]Fulfillment, 0, len(results))
-
 	for _, r := range results {
 		fulfillments = append(fulfillments, Fulfillment{
 			OrderID:             r.OrderID,
 			Status:              r.Delivery.Status,
 			ShoppingType:        r.Delivery.Method,
 			TotalPrice:          r.TotalPrice.TotalPrice.Amount,
+			TransactionCompleted: r.TransactionCompleted,
+			Modifiable:          r.Modifiable,
 			Reopenable:          r.Reopenable,
 			IsSubscriptionOrder: r.IsSubscriptionOrder,
 			DeliveryMessage:     r.Delivery.DeliveryMessage,
@@ -246,7 +294,6 @@ func (c *Client) GetFulfillments(ctx context.Context, status FulfillmentStatus, 
 			},
 		})
 	}
-
 	return fulfillments, nil
 }
 
@@ -329,7 +376,7 @@ func (c *Client) GetOrderHistory(ctx context.Context, size int) ([]Fulfillment, 
 	if size <= 0 {
 		size = 200
 	}
-	return c.GetFulfillments(ctx, FulfillmentClosed, size)
+	return c.GetFulfillments(ctx, WithStatus(FulfillmentClosed), WithSize(size))
 }
 
 // GetOrderHistoryDetail is a convenience wrapper for GetFulfillmentDetail.

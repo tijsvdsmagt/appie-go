@@ -28,7 +28,7 @@ func (cmd *orderCommand) Execute(args []string) error {
 		return err
 	}
 
-	fulfillments, err := client.GetFulfillments(ctx, appie.FulfillmentOpen, 0)
+	fulfillments, err := client.GetFulfillments(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get orders: %w", err)
 	}
@@ -180,11 +180,11 @@ func (cmd *orderListCommand) Execute(args []string) error {
 	}
 
 	if cmd.All {
-		open, err := client.GetFulfillments(ctx, appie.FulfillmentOpen, cmd.N)
+		open, err := client.GetFulfillments(ctx, appie.WithSize(cmd.N))
 		if err != nil {
 			return fmt.Errorf("failed to get open orders: %w", err)
 		}
-		closed, err := client.GetFulfillments(ctx, appie.FulfillmentClosed, cmd.N)
+		closed, err := client.GetFulfillments(ctx, appie.WithStatus(appie.FulfillmentClosed), appie.WithSize(cmd.N))
 		if err != nil {
 			return fmt.Errorf("failed to get closed orders: %w", err)
 		}
@@ -197,14 +197,15 @@ func (cmd *orderListCommand) Execute(args []string) error {
 		return nil
 	}
 
-	status := appie.FulfillmentOpen
+	var opts []appie.FulfillmentOption
 	emptyMsg := "No open orders"
 	if cmd.Closed {
-		status = appie.FulfillmentClosed
+		opts = append(opts, appie.WithStatus(appie.FulfillmentClosed))
 		emptyMsg = "No closed orders"
 	}
+	opts = append(opts, appie.WithSize(cmd.N))
 
-	fulfillments, err := client.GetFulfillments(ctx, status, cmd.N)
+	fulfillments, err := client.GetFulfillments(ctx, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to get orders: %w", err)
 	}
@@ -230,22 +231,29 @@ func (cmd *orderShowCommand) Execute(args []string) error {
 		return err
 	}
 
+	// Try the GraphQL detail path first (works for DELIVERED/CANCELLED orders).
+	// SUBMITTED orders are not yet finalized, so GetFulfillmentDetail fails for
+	// them; in that case fall back to the REST order-detail endpoint.
 	detail, err := client.GetFulfillmentDetail(ctx, cmd.Args.OrderID)
-	if err != nil {
-		// Fall back to REST order detail for open/active orders
-		return showOrderViaREST(ctx, client, cmd.Args.OrderID)
+	if err == nil {
+		printFulfillmentDetail(detail)
+		return nil
 	}
 
-	printFulfillmentDetail(detail)
-	return nil
+	openFulfillments, ferr := client.GetFulfillments(ctx)
+	if ferr != nil {
+		return fmt.Errorf("failed to get orders: %w", ferr)
+	}
+
+	found := findFulfillment(openFulfillments, strconv.Itoa(cmd.Args.OrderID))
+	if found != nil && found.Status == string(appie.FulfillmentSubmitted) {
+		return showOrderViaREST(ctx, client, found, cmd.Args.OrderID)
+	}
+
+	return fmt.Errorf("failed to get order detail: %w", err)
 }
 
-func showOrderViaREST(ctx context.Context, client *appie.Client, orderID int) error {
-	fulfillments, err := client.GetFulfillments(ctx, appie.FulfillmentOpen, 0)
-	if err != nil {
-		return fmt.Errorf("failed to get orders: %w", err)
-	}
-
+func showOrderViaREST(ctx context.Context, client *appie.Client, f *appie.Fulfillment, orderID int) error {
 	order, err := client.GetOrderDetails(ctx, orderID)
 	if err != nil {
 		return fmt.Errorf("failed to get order details: %w", err)
@@ -257,7 +265,6 @@ func showOrderViaREST(ctx context.Context, client *appie.Client, orderID int) er
 		order.TotalDiscount = summary.TotalDiscount
 	}
 
-	f := findFulfillment(fulfillments, order.ID)
 	return printOrder(order, f)
 }
 
@@ -339,7 +346,7 @@ func (cmd *orderAddCommand) Execute(args []string) error {
 		return err
 	}
 
-	fulfillments, err := client.GetFulfillments(ctx, appie.FulfillmentOpen, 0)
+	fulfillments, err := client.GetFulfillments(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get orders: %w", err)
 	}
@@ -394,7 +401,7 @@ func (cmd *orderRmCommand) Execute(args []string) error {
 		return err
 	}
 
-	fulfillments, err := client.GetFulfillments(ctx, appie.FulfillmentOpen, 0)
+	fulfillments, err := client.GetFulfillments(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get orders: %w", err)
 	}
