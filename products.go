@@ -46,6 +46,7 @@ const fetchProductNutritionQuery = `query FetchProduct($productId: Int!) {
     id
     tradeItem {
       nutritions {
+        servingSizeDescription
         nutrients {
           type
           name
@@ -61,7 +62,8 @@ type productNutritionResponse struct {
 		ID        int `json:"id"`
 		TradeItem *struct {
 			Nutritions []struct {
-				Nutrients []struct {
+				ServingSizeDescription string `json:"servingSizeDescription"`
+				Nutrients              []struct {
 					Type  string `json:"type"`
 					Name  string `json:"name"`
 					Value string `json:"value"`
@@ -143,8 +145,10 @@ func (c *Client) GetProductFull(ctx context.Context, productID int) (*Product, e
 	return product, nil
 }
 
-// fetchNutritionalInfo fetches nutritional data for a product via GraphQL.
-func (c *Client) fetchNutritionalInfo(ctx context.Context, productID int) ([]NutritionalInfo, error) {
+// FetchNutritionalInfo fetches nutritional data for a product via GraphQL.
+// Each returned NutritionalInfo entry includes ServingSizeDescription (the actual
+// portion size, e.g. "70 gram") which differs from the per-100g reference value.
+func (c *Client) FetchNutritionalInfo(ctx context.Context, productID int) ([]NutritionalInfo, error) {
 	variables := map[string]any{
 		"productId": productID,
 	}
@@ -160,16 +164,22 @@ func (c *Client) fetchNutritionalInfo(ctx context.Context, productID int) ([]Nut
 
 	var nutritionalInfo []NutritionalInfo
 	for _, nutrition := range resp.Product.TradeItem.Nutritions {
+		desc := nutrition.ServingSizeDescription
 		for _, n := range nutrition.Nutrients {
 			nutritionalInfo = append(nutritionalInfo, NutritionalInfo{
-				Name:  n.Name,
-				Type:  n.Type,
-				Value: n.Value,
+				Name:                   n.Name,
+				Type:                   n.Type,
+				Value:                  n.Value,
+				ServingSizeDescription: desc,
 			})
 		}
 	}
 
 	return nutritionalInfo, nil
+}
+
+func (c *Client) fetchNutritionalInfo(ctx context.Context, productID int) ([]NutritionalInfo, error) {
+	return c.FetchNutritionalInfo(ctx, productID)
 }
 
 // SearchOptions configures a product search.

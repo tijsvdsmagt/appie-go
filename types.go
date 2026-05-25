@@ -26,6 +26,10 @@ type NutritionalInfo struct {
 	Type string `json:"type"`
 	// Value is the amount with unit (e.g., "15.5 g", "250 kcal").
 	Value string `json:"value"`
+	// ServingSizeDescription is the actual serving/portion size (e.g., "70 gram").
+	// This differs from the per-100g reference value used in nutrient calculations.
+	// Present only when nutritional info is fetched via GetProductFull/FetchNutritionalInfo.
+	ServingSizeDescription string `json:"servingSizeDescription,omitempty"`
 }
 
 // Product represents an AH product with pricing and availability information.
