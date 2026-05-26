@@ -44,6 +44,7 @@ type Client struct {
 	configPath   string
 	loginBaseURL string       // overridable for testing; defaults to "https://login.ah.nl"
 	openBrowser  func(string) // overridable for testing; nil uses default
+	onLoginURL   func(string) // optional callback, called with the login URL before opening the browser
 	logger       *log.Logger
 }
 
@@ -84,6 +85,12 @@ func WithConfigPath(path string) Option {
 	return func(c *Client) {
 		c.configPath = path
 	}
+}
+
+// WithOnLoginURL registers a callback that is called with the login URL before
+// the browser is opened. Use this to capture or display the URL in your own UI.
+func WithOnLoginURL(fn func(string)) Option {
+	return func(c *Client) { c.onLoginURL = fn }
 }
 
 // New creates a new AH API client.
@@ -233,54 +240,99 @@ func (c *Client) ensureFreshToken(ctx context.Context, path string) {
 	}
 }
 
-// DoRequest performs an HTTP request and decodes the response.
-func (c *Client) DoRequest(ctx context.Context, method, path string, body, result any) error {
-	c.ensureFreshToken(ctx, path)
-
+// sendRequest builds, sends, and returns a raw HTTP response. The caller is
+// responsible for closing the response body.
+func (c *Client) sendRequest(ctx context.Context, method, path string, bodyBytes []byte) (*http.Response, error) {
 	var bodyReader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("failed to marshal request body: %w", err)
-		}
-		bodyReader = bytes.NewReader(data)
+	if bodyBytes != nil {
+		bodyReader = bytes.NewReader(bodyBytes)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	c.setHeaders(req)
 
-	start := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	return resp, nil
+}
+
+// decodeResponse reads a response body and decodes it into result (if non-nil).
+// Returns an error for HTTP 4xx/5xx statuses.
+func decodeResponse(resp *http.Response, result any) error {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		var apiErr apiError
+		if json.Unmarshal(body, &apiErr) == nil && (apiErr.Code != "" || apiErr.Message != "") {
+			return &apiErr
+		}
+		return fmt.Errorf("API error: %d %s", resp.StatusCode, string(body))
+	}
+	if result != nil && len(body) > 0 {
+		if err := json.Unmarshal(body, result); err != nil {
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
+	}
+	return nil
+}
+
+// DoRequest performs an HTTP request and decodes the response.
+func (c *Client) DoRequest(ctx context.Context, method, path string, body, result any) error {
+	c.ensureFreshToken(ctx, path)
+
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("failed to marshal request body: %w", err)
+		}
+	}
+
+	start := time.Now()
+	resp, err := c.sendRequest(ctx, method, path, bodyBytes)
+	if err != nil {
+		return err
+	}
+
+	// On 401, attempt a token refresh and retry once (skip for auth endpoints to avoid loops).
+	if resp.StatusCode == 401 && !strings.HasPrefix(path, "/mobile-auth/") {
+		resp, err = c.retryAfterRefresh(ctx, method, path, bodyBytes, resp, &start)
+		if err != nil {
+			return err
+		}
 	}
 	defer resp.Body.Close()
 
 	c.logger.Printf("%s %s %d %s", method, path, resp.StatusCode, time.Since(start).Truncate(time.Millisecond))
+	return decodeResponse(resp, result)
+}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
+// retryAfterRefresh closes resp, refreshes the token, and re-sends the request.
+// Returns the new response (or the original if refresh is unavailable/fails).
+func (c *Client) retryAfterRefresh(ctx context.Context, method, path string, bodyBytes []byte, resp *http.Response, start *time.Time) (*http.Response, error) {
+	c.mu.RLock()
+	hasRefresh := c.refreshToken != ""
+	c.mu.RUnlock()
+	if !hasRefresh {
+		return resp, nil
 	}
-
-	if resp.StatusCode >= 400 {
-		var apiErr apiError
-		if json.Unmarshal(respBody, &apiErr) == nil && (apiErr.Code != "" || apiErr.Message != "") {
-			return &apiErr
-		}
-		return fmt.Errorf("API error: %d %s", resp.StatusCode, string(respBody))
+	resp.Body.Close()
+	if err := c.refreshAccessToken(ctx); err != nil {
+		// Refresh failed; caller will still decode the (closed) response — open a
+		// fresh one so the deferred Body.Close() and decodeResponse have a valid body.
+		return c.sendRequest(ctx, method, path, bodyBytes)
 	}
-
-	if result != nil && len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, result); err != nil {
-			return fmt.Errorf("failed to decode response: %w", err)
-		}
-	}
-
-	return nil
+	_ = c.saveConfig()
+	*start = time.Now()
+	return c.sendRequest(ctx, method, path, bodyBytes)
 }
 
 // DoGraphQL performs a GraphQL request.

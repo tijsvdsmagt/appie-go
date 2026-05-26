@@ -86,6 +86,9 @@ func (c *Client) Login(ctx context.Context) error {
 	loginURL := fmt.Sprintf("%s/login?client_id=%s&response_type=code&redirect_uri=appie://login-exit",
 		localOrigin, c.clientID)
 
+	if c.onLoginURL != nil {
+		c.onLoginURL(loginURL)
+	}
 	if c.openBrowser != nil {
 		c.openBrowser(loginURL)
 	} else {
