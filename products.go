@@ -73,6 +73,43 @@ type productNutritionResponse struct {
 	} `json:"product"`
 }
 
+// GraphQL query for fetching net content strings from tradeItem.contents
+const fetchProductContentsQuery = `query FetchProductContents($productId: Int!) {
+  product(id: $productId) {
+    id
+    tradeItem {
+      contents {
+        netContents
+      }
+    }
+  }
+}`
+
+type productContentsResponse struct {
+	Product struct {
+		ID        int `json:"id"`
+		TradeItem *struct {
+			Contents *struct {
+				NetContents []string `json:"netContents"`
+			} `json:"contents"`
+		} `json:"tradeItem"`
+	} `json:"product"`
+}
+
+// FetchNetContents returns the raw net content strings for a product (e.g. ["50.0 Gram", "25.0 Stuks"]).
+// Returns nil if the product has no trade item or contents data.
+func (c *Client) FetchNetContents(ctx context.Context, productID int) ([]string, error) {
+	variables := map[string]any{"productId": productID}
+	var resp productContentsResponse
+	if err := c.DoGraphQL(ctx, fetchProductContentsQuery, variables, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Product.TradeItem == nil || resp.Product.TradeItem.Contents == nil {
+		return nil, nil
+	}
+	return resp.Product.TradeItem.Contents.NetContents, nil
+}
+
 func (p *productResponse) toProduct() Product {
 	price := p.CurrentPrice
 	if price == 0 {
